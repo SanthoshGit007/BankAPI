@@ -27,8 +27,8 @@ app = Flask(__name__)
 # --- Configuration for MySQL (Railway) ---
 DB_USER = os.getenv('MYSQL_USER', 'root') 
 DB_PASS = os.getenv('MYSQL_PASSWORD', 'RoVdEbtOMpxeuMBKLnqcVPVTsNofXOtu')
-DB_HOST = os.getenv('MYSQL_HOST', 'mysql.railway.internal') 
-DB_PORT = os.getenv('MYSQL_PORT', '3306') 
+DB_HOST = os.getenv('MYSQL_HOST', 'yamabiko.proxy.rlwy.net') 
+DB_PORT = os.getenv('MYSQL_PORT', '50624') 
 DB_NAME = os.getenv('MYSQL_DATABASE', 'railway')
 
 # --- Configuration for SAP OData Callback (PHASE 4) ---
