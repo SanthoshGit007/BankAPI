@@ -11,20 +11,6 @@ from mysql.connector import Error
 app = Flask(__name__)
 
 # --- Configuration for MySQL (Railway) ---
-# IMPORTANT: Updated to match the MYSQL_ environment variable prefixes provided by Railway.
-# DB_USER = os.getenv('MYSQL_USER', 'root') 
-# DB_PASS = os.getenv('MYSQL_PASSWORD', 'RoVdEbtOMpxeuMBKLnqcVPVTsNofXOtu') 
-# DB_HOST = os.getenv('MYSQL_HOST', 'yamabiko.proxy.rlwy.net')
-# DB_PORT = os.getenv('MYSQL_PORT', '3306') 
-# DB_NAME = os.getenv('MYSQL_DATABASE', 'railway')
-
-# DB_USER = os.getenv('MYSQL_USER', 'root') 
-# DB_PASS = os.getenv('MYSQL_PASSWORD', '9008') 
-# DB_HOST = os.getenv('MYSQL_HOST', 'localhost')
-# DB_PORT = os.getenv('MYSQL_PORT', '3306') 
-# DB_NAME = os.getenv('MYSQL_DATABASE', 'bankdb') 
-
-# --- Configuration for MySQL (Railway) ---
 DB_USER = os.getenv('MYSQL_USER', 'root') 
 DB_PASS = os.getenv('MYSQL_PASSWORD', 'RoVdEbtOMpxeuMBKLnqcVPVTsNofXOtu')
 DB_HOST = os.getenv('MYSQL_HOST', 'yamabiko.proxy.rlwy.net') 
@@ -32,6 +18,7 @@ DB_PORT = os.getenv('MYSQL_PORT', '50624')
 DB_NAME = os.getenv('MYSQL_DATABASE', 'railway')
 
 # --- Configuration for SAP OData Callback (PHASE 4) ---
+# This OData URL is used to push the CAMT.054 confirmation back to SAP.
 SAP_ODATA_URL = os.getenv('SAP_ODATA_URL', "https://s4h2023.sapdemo.com:44323/sap/opu/odata/sap/Z_BANK_STATEMENT_SRV/BankStatementSet") 
 SAP_USER = os.getenv('SAP_USER', '702374') 
 SAP_PASSWORD = os.getenv('SAP_PASSWORD', 'Welcome123')
@@ -64,7 +51,7 @@ def init_db():
 
 init_db()
 
-# --- PHASE 3: CAMT.054 XML Generation ---
+# --- PHASE 3: CAMT.054 XML Generation (Confirmation back to SAP) ---
 
 def generate_camt_054_xml(payment_details):
     """Generates a CAMT.054 XML confirmation for the debit transaction."""
@@ -141,15 +128,23 @@ def push_camt_to_sap_odata(camt_xml):
     print(f"Attempting to push CAMT statement to SAP OData URL: {SAP_ODATA_URL}")
     
     headers = {
-        'Content-Type': 'application/xml',
+        # Note: The SAP OData service expects a JSON structure with the XML string inside, 
+        # but since your service uses a custom entity with 'XmlData' field, 
+        # we will assume the structure needed for the Bank Statement OData service:
+        'Content-Type': 'application/json',
         'Accept': 'application/json' 
     }
     
+    # Wrap the XML into the JSON payload that matches the OData entity structure
+    odata_payload = {
+        "StatementId": "", # Left blank, filled by SAP
+        "XmlData": camt_xml
+    }
+    
     try:
-        # Use Basic Authentication for the OData call
         response = requests.post(
             SAP_ODATA_URL, 
-            data=camt_xml.encode('utf-8'),
+            data=json.dumps(odata_payload), # Send JSON payload
             headers=headers,
             auth=(SAP_USER, SAP_PASSWORD),
             verify=False 
@@ -157,15 +152,59 @@ def push_camt_to_sap_odata(camt_xml):
         
         response.raise_for_status() 
         print(f"SAP OData Push SUCCESS. Status: {response.status_code}")
+        # print(f"SAP Response Body: {response.text}") # Uncomment for debugging
         return True, response.status_code
         
     except requests.exceptions.RequestException as err:
         print(f"SAP OData Push FAILED: {err}")
+        # print(f"SAP Response Body: {getattr(err.response, 'text', 'No response body')}") # Uncomment for debugging
         http_code = getattr(err.response, 'status_code', 500) if err.response else 500
         return False, http_code
 
+# --- NEW ENDPOINT FOR CPI PAYMENT FILE UPLOAD (SAP -> CPI -> Bank) ---
 
-# --- CORE TRANSACTION ENDPOINT (PHASE 2) ---
+@app.post("/bank/process_payment_file")
+def process_payment_file():
+    """
+    Receives the pain.001 batch file XML from SAP CPI.
+    This simulates the acceptance and processing of the batch file.
+    
+    The request body is expected to be raw XML with Content-Type: application/xml.
+    """
+    
+    # Check if the content type is XML
+    if request.content_type != 'application/xml' and request.content_type != 'text/xml':
+        print(f"Received incorrect Content-Type: {request.content_type}. Expected application/xml.")
+        return jsonify({"status": "ERROR", "message": "Content-Type must be application/xml"}), 415
+
+    # Get the raw XML data
+    pain_xml = request.data.decode('utf-8')
+    
+    if not pain_xml:
+        return jsonify({"status": "FAILED", "message": "Received empty payment file"}), 400
+
+    # --- BEGIN SIMULATION OF BATCH PROCESSING ---
+    
+    # In a real system, you would parse the pain.001 XML here to extract
+    # individual transactions, debit the bank's master account, and notify
+    # the target bank/network (e.g., SWIFT, SEPA).
+    
+    # Since we cannot parse complex XML here, we simply acknowledge and log.
+    
+    print(f"--- Successfully Received PAIN.001 Batch File from CPI ---")
+    print(f"File Size: {len(pain_xml.encode('utf-8'))} bytes")
+    # print(f"File Content (Truncated): {pain_xml[:500]}...") # Optional: log file start
+    
+    # --- END SIMULATION ---
+    
+    # If processing succeeded, the bank returns a success acknowledgement (HTTP 202 or 200).
+    return jsonify({
+        "status": "ACCEPTED",
+        "message": "Payment file accepted for batch processing.",
+        "file_receipt_id": str(uuid.uuid4())
+    }), 202
+
+# --- CORE TRANSACTION ENDPOINT (PHASE 2 - Kept for Confirmation Push Logic) ---
 
 @app.post("/bank/receive_payment")
 def receive_payment():
@@ -173,6 +212,9 @@ def receive_payment():
     PHASE 2.1: Receives JSON payload from SAP.
     Executes atomic database transaction (Debit/Credit).
     Generates CAMT.054 (PHASE 3) and pushes to SAP (PHASE 4).
+    
+    NOTE: This endpoint is likely superseded by the pain.001 file upload flow, 
+    but we keep it to reuse the core transaction and confirmation push logic.
     """
     data = request.json
     
@@ -238,7 +280,14 @@ def receive_payment():
         status_code = 0 # Success
 
         # 6. PUSH CAMT.054 TO SAP (PHASE 3 & 4)
-        camt_xml = generate_camt_054_xml(data)
+        # Note: We now assume the SAP OData service expects JSON containing the XML string.
+        payment_data = {
+            "paymentAmount": payment_amount, 
+            "customerAccount": customer_acc, 
+            "currency": currency, 
+            "endToEndId": end_to_end_id
+        }
+        camt_xml = generate_camt_054_xml(payment_data)
         push_status, http_code = push_camt_to_sap_odata(camt_xml)
 
         return jsonify({
